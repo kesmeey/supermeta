@@ -5,7 +5,7 @@ export interface JsonResponse<T> {
   notModified: boolean;
 }
 
-const USER_AGENT = "supermeta/0.1 (+https://github.com/kesmeey/Spuermeta)";
+const USER_AGENT = "supermeta/0.1 (+https://github.com/kesmeey/supermeta)";
 
 export async function fetchJson<T>(
   url: string,
