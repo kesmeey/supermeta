@@ -1,0 +1,8 @@
+node_modules/
+npm-debug.log*
+.supermeta-demo/
+.tmp-*/
+test/.tmp/
+*.db
+*.db-wal
+*.db-shm

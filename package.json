@@ -1,0 +1,29 @@
+{
+  "name": "supermeta",
+  "version": "0.1.0",
+  "description": "SuperMeta - a Router/Worker super-agent harness for continuous open-source contribution",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.18.0"
+  },
+  "bin": {
+    "supermeta": "./bin/supermeta.js"
+  },
+  "files": [
+    "bin",
+    "src",
+    "docs",
+    "README.md"
+  ],
+  "scripts": {
+    "dev": "node --no-warnings ./src/cli.ts",
+    "demo": "node --no-warnings ./src/cli.ts demo",
+    "test": "node --no-warnings --experimental-test-isolation=none --test \"test/*.test.ts\"",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "typescript": "^7.0.2"
+  }
+}
