@@ -87,3 +87,43 @@ test("an abandoned attempt is closed instead of staying open forever", (t) => {
   assert.ok(run?.finished_at);
   assert.match(run?.note ?? "", /stale/);
 });
+
+test("a requeued stall carries a backoff instead of retrying at once", (t) => {
+  const home = makeHome();
+  const { store, config, task } = seed(home, 5);
+  t.after(() => {
+    store.close();
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  const before = Date.now();
+  const incidents = sweep({ store, config, signal: false });
+  assert.equal(incidents[0]?.action, "requeued");
+  const queued = store.getTask(task.id);
+  assert.equal(queued?.state, "queued");
+  assert.ok((queued?.next_attempt_at ?? 0) > before, "next attempt moved into the future");
+  assert.equal(queued?.stalls, 1);
+});
+
+test("a task that keeps wedging its worker lands in the dead letter state", (t) => {
+  const home = makeHome();
+  const { store, config, task } = seed(home, 6);
+  const strict = { ...config, retry: { ...config.retry, max_stalls: 1 } };
+  t.after(() => {
+    store.close();
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  const restale = () => {
+    const stamp = Date.now() - 60_000;
+    store.db
+      .prepare("update tasks set state = 'running', heartbeat_at = ?, updated_at = ? where id = ?")
+      .run(stamp, stamp, task.id);
+  };
+
+  assert.equal(sweep({ store, config: strict, signal: false })[0]?.action, "requeued");
+  restale();
+  assert.equal(sweep({ store, config: strict, signal: false })[0]?.action, "dead");
+  assert.equal(store.getTask(task.id)?.state, "dead");
+  assert.equal(store.getTask(task.id)?.stalls, 2);
+});

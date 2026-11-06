@@ -139,12 +139,47 @@ export class Router {
     return summary;
   }
 
+  /**
+   * Fair dispatch: take candidates repo by repo in round-robin order, and stop
+   * at `max_workers_per_repo` per repository. Borrowed from how Renovate and
+   * Dependabot cap per-repository work so one noisy project cannot starve the
+   * rest of the watch list.
+   */
+  #pickTasks(free: number): Task[] {
+    const queued = this.store.listRunnable(200);
+    const active = this.store.countActiveByRepo();
+    const byRepo = new Map<string, Task[]>();
+    for (const task of queued) {
+      const list = byRepo.get(task.repo) ?? [];
+      list.push(task);
+      byRepo.set(task.repo, list);
+    }
+
+    const repos = [...byRepo.keys()].sort();
+    const picked: Task[] = [];
+    let progressed = true;
+    while (picked.length < free && progressed) {
+      progressed = false;
+      for (const repo of repos) {
+        if (picked.length >= free) break;
+        const list = byRepo.get(repo);
+        const task = list?.shift();
+        if (!list || !task) continue;
+        if ((active.get(repo) ?? 0) >= this.config.limits.max_workers_per_repo) continue;
+        active.set(repo, (active.get(repo) ?? 0) + 1);
+        picked.push(task);
+        progressed = true;
+      }
+    }
+    return picked;
+  }
+
   #dispatch(): number {
     const free = Math.max(0, this.config.max_workers - this.store.countRunning());
     if (free === 0) return 0;
 
     let dispatched = 0;
-    for (const task of this.store.listRunnable(free)) {
+    for (const task of this.#pickTasks(free)) {
       const claimed = this.store.beginDispatch(task.id, shortId("w"));
       if (!claimed) continue;
       try {

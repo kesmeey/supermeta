@@ -19,6 +19,7 @@ const STATE_COLOR: Record<string, (text: string) => string> = {
   dispatching: cyan,
   queued: yellow,
   blocked: yellow,
+  dead: red,
   cancelled: dim,
 };
 

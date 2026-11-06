@@ -53,6 +53,8 @@ create table if not exists tasks (
   priority integer not null default 0,
   attempts integer not null default 0,
   max_attempts integer not null default 3,
+  next_attempt_at integer not null default 0,
+  stalls integer not null default 0,
   created_at integer not null,
   updated_at integer not null,
   started_at integer,
@@ -136,6 +138,9 @@ export interface ReportMetrics {
   tasks_failed: number;
   tasks_queued: number;
   tasks_running: number;
+  tasks_dead: number;
+  retries: number;
+  stalls: number;
   attempts: number;
   recoveries: number;
   inline_chars: number;
@@ -158,9 +163,16 @@ export class Store {
 
   /** Additive migrations only: v0.x must be able to open an older state.db. */
   private migrate(): void {
-    const columns = this.db.prepare("pragma table_info(events)").all() as unknown as { name: string }[];
-    if (!columns.some((column) => column.name === "meta")) {
+    const events = this.db.prepare("pragma table_info(events)").all() as unknown as { name: string }[];
+    if (!events.some((column) => column.name === "meta")) {
       this.db.exec("alter table events add column meta text not null default '{}'");
+    }
+    const tasks = this.db.prepare("pragma table_info(tasks)").all() as unknown as { name: string }[];
+    if (!tasks.some((column) => column.name === "next_attempt_at")) {
+      this.db.exec("alter table tasks add column next_attempt_at integer not null default 0");
+    }
+    if (!tasks.some((column) => column.name === "stalls")) {
+      this.db.exec("alter table tasks add column stalls integer not null default 0");
     }
   }
 
@@ -309,10 +321,28 @@ export class Store {
     return Number(row.c);
   }
 
-  listRunnable(limit: number): Task[] {
+  /** Queued tasks whose retry backoff has elapsed. */
+  listRunnable(limit: number, now = Date.now()): Task[] {
     return this.db
-      .prepare("select * from tasks where state = 'queued' order by priority desc, created_at asc limit ?")
-      .all(limit) as unknown as Task[];
+      .prepare(
+        `select * from tasks
+          where state = 'queued' and next_attempt_at <= ?
+          order by priority desc, next_attempt_at asc, created_at asc
+          limit ?`,
+      )
+      .all(now, limit) as unknown as Task[];
+  }
+
+  /** Live task count per repository, used to keep one repo from eating the pool. */
+  countActiveByRepo(): Map<string, number> {
+    const rows = this.db
+      .prepare(
+        `select repo, count(*) as c from tasks
+          where state in ('dispatching', 'running')
+          group by repo`,
+      )
+      .all() as unknown as { repo: string; c: number }[];
+    return new Map(rows.map((row) => [row.repo, Number(row.c)]));
   }
 
   /** queued -> dispatching. Attempts are counted at dispatch time, never at completion time. */
@@ -370,16 +400,39 @@ export class Store {
       .run(patch.state, patch.summary ?? null, patch.error ?? null, now, now, id);
   }
 
-  requeueTask(id: string, error: string): void {
+  /**
+   * Return a task to the queue after a failure or a stall. `nextAttemptAt`
+   * carries the backoff decision; the Router only dispatches past it.
+   */
+  requeueTask(id: string, error: string, nextAttemptAt = 0): void {
     const now = Date.now();
     this.db
       .prepare(
         `update tasks
             set state = 'queued', last_error = ?, worker_id = null, pid = null,
-                heartbeat_at = null, updated_at = ?
+                heartbeat_at = null, next_attempt_at = ?, updated_at = ?
           where id = ?`,
       )
-      .run(error, now, id);
+      .run(error, nextAttemptAt, now, id);
+  }
+
+  /** Bump the stall counter; returns the new value. */
+  recordStall(id: string): number {
+    this.db.prepare("update tasks set stalls = stalls + 1, updated_at = ? where id = ?").run(Date.now(), id);
+    return this.getTask(id)?.stalls ?? 0;
+  }
+
+  /** Terminal state for work that must not be retried again. */
+  markDead(id: string, error: string): void {
+    const now = Date.now();
+    this.db
+      .prepare(
+        `update tasks
+            set state = 'dead', last_error = ?, finished_at = ?, updated_at = ?,
+                worker_id = null, pid = null
+          where id = ?`,
+      )
+      .run(error, now, now, id);
   }
 
   /** Tasks that claim to be executing but have stopped reporting. */
@@ -579,7 +632,10 @@ export class Store {
       tasks_failed: scalar("select count(*) from tasks where state = 'failed'"),
       tasks_queued: scalar("select count(*) from tasks where state in ('queued', 'dispatching')"),
       tasks_running: scalar("select count(*) from tasks where state = 'running'"),
+      tasks_dead: scalar("select count(*) from tasks where state = 'dead'"),
       attempts: scalar("select count(*) from runs"),
+      retries: scalar("select count(*) from runs where note like 'retry%'"),
+      stalls: scalar("select coalesce(sum(stalls), 0) from tasks"),
       recoveries: scalar("select count(*) from runs where note like 'stale%'"),
       inline_chars: scalar("select coalesce(sum(inline_chars), 0) from runs"),
       spill_chars: scalar("select coalesce(sum(spill_chars), 0) from runs"),

@@ -2,6 +2,7 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { ensureDir } from "./util.ts";
+import type { RetryPolicy } from "./retry.ts";
 
 export interface Config {
   /** Root for all durable state. Defaults to ~/.supermeta */
@@ -24,6 +25,14 @@ export interface Config {
     tick_ms: number;
   };
   jobs: { default_job: string };
+  /** Backoff between attempts, plus how many stalls a task may absorb. */
+  retry: RetryPolicy & { max_stalls: number };
+  limits: {
+    /** Keep one repository from occupying every worker slot. */
+    max_workers_per_repo: number;
+    /** Client-side ceiling for GitHub API calls, per process. */
+    github_requests_per_minute: number;
+  };
   experiments: {
     /** Turn off to measure how much duplicate work thread routing prevents. */
     thread_subscription: boolean;
@@ -43,6 +52,8 @@ export const DEFAULT_CONFIG: Config = {
   },
   watchdog: { stale_ms: 45_000, grace_ms: 15_000, tick_ms: 5_000 },
   jobs: { default_job: "triage" },
+  retry: { base_ms: 15_000, factor: 2, max_ms: 30 * 60_000, jitter: 0.2, max_stalls: 2 },
+  limits: { max_workers_per_repo: 1, github_requests_per_minute: 20 },
   experiments: { thread_subscription: true },
   github: { api_base: "https://api.github.com", token_env: "GITHUB_TOKEN", per_page: 30 },
 };
@@ -71,6 +82,8 @@ export function loadConfig(opts: ResolveOptions = {}): Config {
     db_path: join(home, "state.db"),
     watch: { ...DEFAULT_CONFIG.watch },
     watchdog: { ...DEFAULT_CONFIG.watchdog },
+    retry: { ...DEFAULT_CONFIG.retry },
+    limits: { ...DEFAULT_CONFIG.limits },
   };
   if (!existsSync(path)) return base;
 
@@ -84,6 +97,8 @@ export function loadConfig(opts: ResolveOptions = {}): Config {
     watch: { ...base.watch, ...(raw.watch ?? {}) },
     watchdog: { ...base.watchdog, ...(raw.watchdog ?? {}) },
     jobs: { ...base.jobs, ...(raw.jobs ?? {}) },
+    retry: { ...base.retry, ...(raw.retry ?? {}) },
+    limits: { ...base.limits, ...(raw.limits ?? {}) },
     experiments: { ...base.experiments, ...(raw.experiments ?? {}) },
     github: { ...base.github, ...(raw.github ?? {}) },
   };

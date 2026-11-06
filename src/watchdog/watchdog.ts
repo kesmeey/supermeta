@@ -1,6 +1,7 @@
 import type { Config } from "../config.ts";
 import type { Store } from "../db.ts";
 import type { WatchdogIncident } from "../types.ts";
+import { backoffDelay, describeDelay } from "../retry.ts";
 
 export interface SweepOptions {
   store: Store;
@@ -40,12 +41,26 @@ export function sweep(options: SweepOptions): WatchdogIncident[] {
       store.closeRunStale(run.seq, `stale: ${detail}`);
     }
 
-    if (task.attempts >= task.max_attempts) {
+    // A stall is not the same failure as a bad result: BullMQ keeps a separate
+    // `maxStalledCount` so a task that keeps wedging its worker cannot loop
+    // forever on the retry budget alone.
+    const stalls = store.recordStall(task.id);
+    if (stalls > config.retry.max_stalls) {
+      store.markDead(task.id, `watchdog: stalled ${stalls} times (${detail})`);
+      incidents.push({ task_id: task.id, thread: task.thread, action: "dead", detail, at: now });
+    } else if (task.attempts >= task.max_attempts) {
       store.finishTask(task.id, { state: "failed", error: `watchdog: ${detail}` });
       incidents.push({ task_id: task.id, thread: task.thread, action: "failed", detail, at: now });
     } else {
-      store.requeueTask(task.id, `watchdog: ${detail}`);
-      incidents.push({ task_id: task.id, thread: task.thread, action: "requeued", detail, at: now });
+      const delay = backoffDelay(task.attempts, config.retry);
+      store.requeueTask(task.id, `watchdog: ${detail}`, now + delay);
+      incidents.push({
+        task_id: task.id,
+        thread: task.thread,
+        action: "requeued",
+        detail: `${detail}; retry in ${describeDelay(delay)}`,
+        at: now,
+      });
     }
   }
 

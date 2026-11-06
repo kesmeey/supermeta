@@ -52,6 +52,7 @@ export type TaskState =
   | "blocked"
   | "done"
   | "failed"
+  | "dead"
   | "cancelled";
 
 export interface Task {
@@ -66,6 +67,10 @@ export interface Task {
   priority: number;
   attempts: number;
   max_attempts: number;
+  /** Epoch ms before which the task must not be dispatched (retry backoff). */
+  next_attempt_at: number;
+  /** How many times a worker was declared stalled on this task. */
+  stalls: number;
   created_at: number;
   updated_at: number;
   started_at: number | null;
@@ -159,7 +164,7 @@ export interface TickSummary {
 export interface WatchdogIncident {
   task_id: string;
   thread: string;
-  action: "requeued" | "failed" | "killed";
+  action: "requeued" | "failed" | "killed" | "dead";
   detail: string;
   at: number;
 }

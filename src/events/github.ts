@@ -66,6 +66,7 @@ export class GitHubSource implements EventSource {
     const response = await fetchJson<GitHubIssue[]>(url, {
       token: this.#token,
       etag: this.#etags.get(url) ?? null,
+      perMinute: this.#config.limits.github_requests_per_minute,
     });
     if (response.notModified || !response.data) return [];
     if (response.etag) this.#etags.set(url, response.etag);
@@ -123,6 +124,7 @@ export class GitHubSource implements EventSource {
     const response = await fetchJson<GitHubNotification[]>(url, {
       token: this.#token,
       etag: this.#etags.get(url) ?? null,
+      perMinute: this.#config.limits.github_requests_per_minute,
     });
     if (response.notModified || !response.data) return [];
     if (response.etag) this.#etags.set(url, response.etag);
@@ -175,6 +177,9 @@ export async function fetchIssue(
 ): Promise<GitHubIssue | null> {
   const token = process.env[config.github.token_env];
   const url = `${config.github.api_base}/repos/${repo}/issues/${number}`;
-  const response = await fetchJson<GitHubIssue>(url, { token });
+  const response = await fetchJson<GitHubIssue>(url, {
+    token,
+    perMinute: config.limits.github_requests_per_minute,
+  });
   return response.data;
 }

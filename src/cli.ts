@@ -13,7 +13,8 @@ import { sweep } from "./watchdog/watchdog.ts";
 import { listJobs } from "./worker/jobs.ts";
 import * as ui from "./ui.ts";
 import { duration, iso, percentile } from "./util.ts";
-import type { TaskState } from "./types.ts";
+import { describeDelay } from "./retry.ts";
+import type { Task, TaskState } from "./types.ts";
 
 const ENTRY = fileURLToPath(import.meta.url);
 const VERSION = "0.1.0";
@@ -150,6 +151,8 @@ async function cmdDemo(flags: Map<string, string | true>): Promise<number> {
     },
     watchdog: { stale_ms: 2200, grace_ms: 2000, tick_ms: 250 },
     jobs: { default_job: "demo" },
+    retry: { base_ms: 500, factor: 2, max_ms: 4_000, jitter: 0.1, max_stalls: 2 },
+    limits: { max_workers_per_repo: 1, github_requests_per_minute: 60 },
     experiments: { thread_subscription: !has(flags, "no-subscription") },
     github: { ...DEFAULT_CONFIG.github },
   };
@@ -320,13 +323,13 @@ function cmdTasks(flags: Map<string, string | true>): number {
     }
     process.stdout.write(
       ui.table(
-        ["id", "thread", "state", "att", "dur", "summary"],
+        ["id", "thread", "state", "att", "when", "summary"],
         tasks.map((task) => [
           task.id,
           task.thread,
           ui.state(task.state),
           `${task.attempts}/${task.max_attempts}`,
-          task.started_at && task.finished_at ? duration(task.finished_at - task.started_at) : "-",
+          taskWhen(task),
           (task.summary ?? task.last_error ?? "").slice(0, 64),
         ]),
       ) + "\n",
@@ -356,9 +359,11 @@ function cmdTask(taskId: string | undefined, flags: Map<string, string | true>):
         `  title     ${task.title}`,
         `  job       ${task.job}`,
         `  attempts  ${task.attempts}/${task.max_attempts}`,
+        `  stalls    ${task.stalls}`,
         `  created   ${iso(task.created_at)}`,
         `  started   ${iso(task.started_at)}`,
         `  finished  ${iso(task.finished_at)}`,
+        `  next try  ${task.state === "queued" && task.next_attempt_at > Date.now() ? iso(task.next_attempt_at) : "-"}`,
         `  worker    ${task.worker_id ?? "-"}`,
         `  summary   ${task.summary ?? "-"}`,
         `  error     ${task.last_error ?? "-"}`,
@@ -533,11 +538,13 @@ function printReport(store: Store, config: Config): void {
   const rows: [string, string][] = [
     ["events", `${metrics.events}  (routed ${metrics.events_routed}, ignored ${metrics.events_ignored})`],
     ["router decisions", String(metrics.decisions)],
-    ["tasks", `${metrics.tasks}  (done ${metrics.tasks_done}, failed ${metrics.tasks_failed})`],
+    ["tasks", `${metrics.tasks}  (done ${metrics.tasks_done}, failed ${metrics.tasks_failed}, dead ${metrics.tasks_dead})`],
     ["worker attempts", String(metrics.attempts)],
+    ["worker retries", String(metrics.retries)],
+    ["stalls recovered", String(metrics.stalls)],
     ["watchdog recoveries", String(metrics.recoveries)],
     ["task p50 / p95", `${duration(p50)} / ${duration(p95)}`],
-    ["workers", `ceiling ${config.max_workers}`],
+    ["workers", `ceiling ${config.max_workers}, per repo ${config.limits.max_workers_per_repo}`],
     [
       "context",
       `inline ${metrics.inline_chars} chars vs spill ${metrics.spill_chars} chars kept out of context`,
@@ -583,6 +590,16 @@ function printHelp(): void {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Compact "when" cell: took X, waiting Y for a retry, or a dash. */
+function taskWhen(task: Task): string {
+  if (task.state === "queued") {
+    const wait = task.next_attempt_at - Date.now();
+    return wait > 0 ? `in ${describeDelay(wait)}` : "ready";
+  }
+  if (task.started_at && task.finished_at) return duration(task.finished_at - task.started_at);
+  return "-";
 }
 
 const isEntry =

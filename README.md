@@ -28,10 +28,12 @@ issue:103      acme/widget#103  create_task    labels: bug
 Metrics
   events               6  (routed 5, ignored 1)
   router decisions     6
-  tasks                3  (done 3, failed 0)
+  tasks                3  (done 3, failed 0, dead 0)
   worker attempts      4
+  worker retries       0
+  stalls recovered     1
   watchdog recoveries  1
-  task p50 / p95       1.8s / 4.5s
+  task p50 / p95       1.8s / 4.9s
   context              inline 460 chars vs spill 1828 chars kept out of context
 ```
 
@@ -141,6 +143,19 @@ SuperMeta 是**独立的实现**，不是官方代码，领域也换成开源贡
 
 细节和测量方法见 [docs/super-agent.md](docs/super-agent.md)，架构见 [docs/architecture.md](docs/architecture.md)。
 
+## 从别的项目借来的
+
+Super-agent 那篇讲的是「系统该长成什么样」，但「长期运行的队列」这件事，队列和 CI 领域已经踩了十几年坑。以下机制是照着成熟实现做的，逐条来源见 [docs/borrowed.md](docs/borrowed.md)：
+
+| 机制 | 借鉴自 | 解决什么 |
+|---|---|---|
+| 指数退避 + 抖动 | BullMQ / Sidekiq / Temporal | 失败后立刻重试 = 热循环；退避写进 `next_attempt_at`，Router 只派发到期的 |
+| 停滞预算与失败预算分离 | BullMQ `maxStalledCount` | 「把 worker 卡死」和「跑挂了」是两种故障，混在一个计数器里就都无法单独收紧 |
+| 死信状态 | Sidekiq dead set | `dead` 只由看门狗写入，不再自动重试，可人工兜底 |
+| 单仓库并发上限 + 轮转 | Renovate `prConcurrentLimit` | 一个仓库灌 50 个 issue 会占满所有槽位，其它仓库永远排队 |
+| 客户端限流 + `Retry-After` | Octokit throttling | 不靠 403 才发现超限 |
+| 心跳超时 | Temporal `heartbeat_timeout` | 判断「慢」还是「死」 |
+
 ## 设计取舍
 
 **SQLite 是唯一的 IPC。** Router 和 Worker 之间没有管道、没有 RPC，只共享一个数据库。好处是任意一方崩溃都不影响另一方，`tasks` / `runs` / `decisions` 天然就是审计日志；坏处是延迟以毫秒计，不适合高频消息。这个项目要的是**可恢复**，不是低延迟。
@@ -164,6 +179,7 @@ SuperMeta 是**独立的实现**，不是官方代码，领域也换成开源贡
 src/
   cli.ts                 命令入口
   db.ts                  schema + 所有查询（唯一的状态真相）
+  retry.ts               退避与抖动（BullMQ / Temporal 的形状）
   router/router.ts       tick：拉事件 → 决策 → 派单 → 监督
   router/policy.ts       纯函数决策门
   router/memory.ts       inline / spill
@@ -176,11 +192,12 @@ src/
 docs/
   architecture.md        状态机与调用序列
   super-agent.md         与论文的逐条对照 + 测量口径
-test/                    20 个测试，node --test
+  borrowed.md            每个机制借鉴自哪个项目，以及没做的部分
+test/                    29 个测试，node --test
 ```
 
 ```bash
-npm test         # 20 passed
+npm test         # 29 passed
 npm run typecheck
 ```
 

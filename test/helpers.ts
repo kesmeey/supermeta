@@ -19,6 +19,8 @@ export function testConfig(home: string, overrides: Partial<Config> = {}): Confi
     watch: { repos: [], labels: ["bug"], ignore_actors: [] },
     watchdog: { stale_ms: 60_000, grace_ms: 5_000, tick_ms: 100 },
     jobs: { default_job: "sleep" },
+    retry: { base_ms: 1, factor: 2, max_ms: 10, jitter: 0, max_stalls: 2 },
+    limits: { max_workers_per_repo: 2, github_requests_per_minute: 0 },
     experiments: { thread_subscription: true },
     github: { ...DEFAULT_CONFIG.github },
     ...overrides,

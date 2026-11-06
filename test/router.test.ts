@@ -102,3 +102,59 @@ test("a finished task leaves an inline summary and a spill artifact", async (t) 
   assert.ok(context.inlineChars < context.spillChars);
   assert.match(context.inline[0] ?? "", /^\[t_/);
 });
+
+test("one repository cannot occupy every worker slot", async (t) => {
+  const home = makeHome();
+  const events = [
+    event({ id: "a1", repo: "acme/widget", thread: "acme/widget#1" }),
+    event({ id: "a2", repo: "acme/widget", thread: "acme/widget#2" }),
+    event({ id: "b1", repo: "acme/gadget", thread: "acme/gadget#1" }),
+    event({ id: "b2", repo: "acme/gadget", thread: "acme/gadget#2" }),
+  ];
+  const { store, router } = build(home, events, {
+    max_workers: 4,
+    limits: { max_workers_per_repo: 1, github_requests_per_minute: 0 },
+  });
+  t.after(() => {
+    store.close();
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  const summary = await router.tick();
+  assert.equal(summary.created, 4);
+  assert.equal(summary.dispatched, 2, "one per repository");
+
+  const running = store.listTasks().filter((task) => task.state !== "queued");
+  assert.deepEqual([...new Set(running.map((task) => task.repo))].sort(), ["acme/gadget", "acme/widget"]);
+
+  await router.drain();
+});
+
+test("a task is not dispatched before its backoff elapses", async (t) => {
+  const home = makeHome();
+  const { store, router } = build(home, []);
+  t.after(() => {
+    store.close();
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  const task = store.createTask({
+    thread: "acme/widget#9",
+    repo: "acme/widget",
+    title: "retry me later",
+    kind: "issue_opened",
+    job: "sleep",
+    payload: { ms: 5 },
+    priority: 10,
+    max_attempts: 3,
+    origin_event: "e9",
+  });
+  store.requeueTask(task.id, "transient", Date.now() + 60_000);
+
+  assert.equal((await router.tick()).dispatched, 0);
+
+  store.db.prepare("update tasks set next_attempt_at = 0 where id = ?").run(task.id);
+  assert.equal((await router.tick()).dispatched, 1);
+  await router.drain();
+  assert.equal(store.getTask(task.id)?.state, "done");
+});

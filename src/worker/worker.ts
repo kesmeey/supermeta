@@ -3,6 +3,7 @@ import type { Store } from "../db.ts";
 import type { MemoryLayer } from "../router/memory.ts";
 import type { Task } from "../types.ts";
 import { shortId } from "../util.ts";
+import { backoffDelay, describeDelay } from "../retry.ts";
 import { getJob } from "./jobs.ts";
 
 export interface RunTaskOptions {
@@ -92,9 +93,9 @@ export async function runTask(options: RunTaskOptions): Promise<RunTaskResult> {
       log(`failed after ${task.attempts} attempt(s): ${message}`);
       return { ok: false, state: "failed", error: message };
     }
-    store.requeueTask(task.id, message);
+    store.requeueTask(task.id, message, Date.now() + backoffDelay(task.attempts, config.retry));
     store.finishRun(runSeq, { exit_code: 1, note: `retry: ${message}`, inline_chars: 0, spill_chars: 0 });
-    log(`retrying (${task.attempts}/${task.max_attempts}): ${message}`);
+    log(`retrying (${task.attempts}/${task.max_attempts}) in ${describeDelay(backoffDelay(task.attempts, config.retry))}: ${message}`);
     return { ok: false, state: "queued", error: message };
   } finally {
     clearInterval(timer);
